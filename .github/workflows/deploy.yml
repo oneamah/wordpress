@@ -1,0 +1,128 @@
+name: Deploy Wordpress Application To EKS
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/deploy.yml"
+      - "infrastructure/**"
+      - "gitops/**"
+      - "app/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/deploy.yml"
+      - "infrastructure/**"
+      - "gitops/**"
+      - "app/**"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+  AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+  WORDPRESS_NAMESPACE: ${{ vars.WORDPRESS_NAMESPACE || 'wordpress' }}
+  WORDPRESS_RELEASE_NAME: ${{ vars.WORDPRESS_RELEASE_NAME || 'wordpress' }}
+  TERRAFORM_IMAGE: hashicorp/terraform:1.9.8
+jobs:
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace/infrastructure \
+            "$TERRAFORM_IMAGE" init -input=false
+
+      - name: Terraform Validate
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace/infrastructure \
+            "$TERRAFORM_IMAGE" validate
+
+      - name: Terraform Plan
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace/infrastructure \
+            "$TERRAFORM_IMAGE" plan -input=false -out=tfplan
+
+  deploy:
+    name: Deploy Infrastructure And Workload
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace/infrastructure \
+            "$TERRAFORM_IMAGE" init -input=false
+
+      - name: Terraform Apply
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace/infrastructure \
+            "$TERRAFORM_IMAGE" apply -input=false -auto-approve
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Create namespace
+        run: kubectl create namespace "$WORDPRESS_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy WordPress manifest if present
+        run: |
+          if [ -s gitops/app.yml ]; then
+            kubectl apply -f gitops/app.yml
+            exit 0
+          fi
+
+          echo "gitops/app.yml is empty. Deploying WordPress with Helm instead."
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm repo update
+
+          helm upgrade --install "$WORDPRESS_RELEASE_NAME" bitnami/wordpress \
+            --namespace "$WORDPRESS_NAMESPACE" \
+            --wait \
+            --set service.type=LoadBalancer \
+            --set persistence.enabled=true \
+            --set mariadb.primary.persistence.enabled=true \
+            --set wordpressUsername="${{ secrets.WORDPRESS_ADMIN_USER }}" \
+            --set wordpressPassword="${{ secrets.WORDPRESS_ADMIN_PASSWORD }}" \
+            --set wordpressEmail="${{ secrets.WORDPRESS_ADMIN_EMAIL }}" \
+            --set wordpressBlogName="${{ vars.WORDPRESS_BLOG_NAME || 'WordPress on EKS' }}"
