@@ -172,18 +172,42 @@ jobs:
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm repo update
 
-          helm upgrade --install "$WORDPRESS_RELEASE_NAME" bitnami/wordpress \
-            --namespace "$WORDPRESS_NAMESPACE" \
-            --wait \
-            --timeout 15m \
-            --set service.type=LoadBalancer \
-            --set persistence.enabled=true \
-            --set persistence.storageClass=wordpress-efs \
-            --set persistence.accessModes[0]=ReadWriteMany \
-            --set mariadb.primary.persistence.enabled=true \
-            --set mariadb.primary.persistence.storageClass=wordpress-efs \
-            --set mariadb.primary.persistence.accessModes[0]=ReadWriteMany \
-            --set wordpressUsername="${{ secrets.WORDPRESS_ADMIN_USER }}" \
-            --set wordpressPassword="${{ secrets.WORDPRESS_ADMIN_PASSWORD }}" \
-            --set wordpressEmail="${{ secrets.WORDPRESS_ADMIN_EMAIL }}" \
-            --set wordpressBlogName="${{ vars.WORDPRESS_BLOG_NAME || 'WordPress on EKS' }}"
+          deploy_wordpress() {
+            helm upgrade --install "$WORDPRESS_RELEASE_NAME" bitnami/wordpress \
+              --namespace "$WORDPRESS_NAMESPACE" \
+              --wait \
+              --timeout 15m \
+              --set service.type=LoadBalancer \
+              --set persistence.enabled=true \
+              --set persistence.storageClass=wordpress-efs \
+              --set persistence.accessModes[0]=ReadWriteMany \
+              --set mariadb.primary.persistence.enabled=true \
+              --set mariadb.primary.persistence.storageClass=wordpress-efs \
+              --set mariadb.primary.persistence.accessModes[0]=ReadWriteMany \
+              --set wordpressUsername="${{ secrets.WORDPRESS_ADMIN_USER }}" \
+              --set wordpressPassword="${{ secrets.WORDPRESS_ADMIN_PASSWORD }}" \
+              --set wordpressEmail="${{ secrets.WORDPRESS_ADMIN_EMAIL }}" \
+              --set wordpressBlogName="${{ vars.WORDPRESS_BLOG_NAME || 'WordPress on EKS' }}"
+          }
+
+          set +e
+          DEPLOY_OUTPUT="$(deploy_wordpress 2>&1)"
+          DEPLOY_EXIT=$?
+          set -e
+
+          echo "$DEPLOY_OUTPUT"
+
+          if [ $DEPLOY_EXIT -eq 0 ]; then
+            exit 0
+          fi
+
+          if echo "$DEPLOY_OUTPUT" | grep -qi "spec is immutable"; then
+            echo "Immutable Kubernetes storage fields detected. Recreating WordPress release."
+            helm uninstall "$WORDPRESS_RELEASE_NAME" --namespace "$WORDPRESS_NAMESPACE" || true
+            kubectl delete pvc "$WORDPRESS_RELEASE_NAME" --namespace "$WORDPRESS_NAMESPACE" --ignore-not-found=true
+            kubectl delete pvc "data-${WORDPRESS_RELEASE_NAME}-mariadb-0" --namespace "$WORDPRESS_NAMESPACE" --ignore-not-found=true
+            deploy_wordpress
+            exit 0
+          fi
+
+          exit $DEPLOY_EXIT
