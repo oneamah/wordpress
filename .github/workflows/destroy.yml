@@ -1,0 +1,104 @@
+name: Destroy WordPress EKS Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: "AWS region to destroy"
+        required: false
+        type: string
+        default: "us-east-1"
+      eks_cluster_name:
+        description: "EKS cluster name"
+        required: false
+        type: string
+        default: "wordpress-eks"
+      aws_role_to_assume:
+        description: "IAM role ARN for GitHub OIDC (optional if set in repo variable)"
+        required: false
+        type: string
+        default: ""
+      confirm_destroy:
+        description: "Type DESTROY to confirm"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ github.event.inputs.aws_region || vars.AWS_REGION || 'us-east-1' }}
+  EKS_CLUSTER_NAME: ${{ github.event.inputs.eks_cluster_name || vars.EKS_CLUSTER_NAME || 'wordpress-eks' }}
+  AWS_ROLE_TO_ASSUME: ${{ github.event.inputs.aws_role_to_assume || vars.AWS_ROLE_TO_ASSUME || '' }}
+  WORDPRESS_NAMESPACE: ${{ vars.WORDPRESS_NAMESPACE || 'wordpress' }}
+  WORDPRESS_RELEASE_NAME: ${{ vars.WORDPRESS_RELEASE_NAME || 'wordpress' }}
+
+jobs:
+  destroy:
+    name: Destroy Infrastructure
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Confirm destroy input
+        run: |
+          if [ "${{ github.event.inputs.confirm_destroy }}" != "DESTROY" ]; then
+            echo "Confirmation failed. You must type DESTROY to proceed."
+            exit 1
+          fi
+
+      - name: Validate AWS role input
+        run: |
+          if [ -z "$AWS_ROLE_TO_ASSUME" ]; then
+            echo "Missing AWS role ARN. Provide one of:"
+            echo "1) workflow_dispatch input: aws_role_to_assume"
+            echo "2) repository variable: AWS_ROLE_TO_ASSUME"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-session-name: github-actions-destroy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: Terraform Init
+        run: terraform -chdir=infrastructure init -input=false
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME" || true
+
+      - name: Uninstall WordPress Helm release
+        run: |
+          helm uninstall "$WORDPRESS_RELEASE_NAME" --namespace "$WORDPRESS_NAMESPACE" --wait --timeout 5m || true
+
+      - name: Delete WordPress namespace
+        run: |
+          kubectl delete namespace "$WORDPRESS_NAMESPACE" --ignore-not-found=true --timeout=5m || true
+
+      - name: Delete LoadBalancer services (prevent orphaned ELBs)
+        run: |
+          kubectl get svc --all-namespaces -o json \
+            | jq -r '.items[] | select(.spec.type=="LoadBalancer") | "\(.metadata.namespace) \(.metadata.name)"' \
+            | while read ns name; do
+                echo "Deleting LoadBalancer svc $name in $ns"
+                kubectl delete svc "$name" -n "$ns" --ignore-not-found=true || true
+              done
+
+      - name: Wait for ELBs to be deleted
+        run: |
+          echo "Waiting 30s for AWS to release ELB resources..."
+          sleep 30
+
+      - name: Terraform Destroy
+        run: terraform -chdir=infrastructure destroy -input=false -auto-approve
