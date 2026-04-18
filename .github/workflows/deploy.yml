@@ -29,6 +29,11 @@ on:
         required: false
         type: string
         default: "wordpress-eks"
+      aws_role_to_assume:
+        description: "IAM role ARN for GitHub OIDC (optional if set in repo variable)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   id-token: write
@@ -37,9 +42,9 @@ permissions:
 env:
   AWS_REGION: ${{ github.event.inputs.aws_region || vars.AWS_REGION || 'us-east-1' }}
   EKS_CLUSTER_NAME: ${{ github.event.inputs.eks_cluster_name || vars.EKS_CLUSTER_NAME || 'wordpress-eks' }}
+  AWS_ROLE_TO_ASSUME: ${{ github.event.inputs.aws_role_to_assume || vars.AWS_ROLE_TO_ASSUME || '' }}
   WORDPRESS_NAMESPACE: ${{ vars.WORDPRESS_NAMESPACE || 'wordpress' }}
   WORDPRESS_RELEASE_NAME: ${{ vars.WORDPRESS_RELEASE_NAME || 'wordpress' }}
-  TERRAFORM_IMAGE: hashicorp/terraform:1.14.8
 jobs:
   terraform-plan:
     name: Terraform Plan
@@ -50,41 +55,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Validate AWS role secret
+      - name: Validate AWS role input
         run: |
-          if [ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]; then
-            echo "Missing required secret: AWS_ROLE_TO_ASSUME"
-            echo "Set repository secret AWS_ROLE_TO_ASSUME to your IAM role ARN trusted for GitHub OIDC."
+          if [ -z "$AWS_ROLE_TO_ASSUME" ]; then
+            echo "Missing AWS role ARN. Provide one of:"
+            echo "1) workflow_dispatch input: aws_role_to_assume"
+            echo "2) repository variable: AWS_ROLE_TO_ASSUME"
             exit 1
           fi
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v5
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
           role-session-name: github-actions-terraform-plan
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
       - name: Terraform Init
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace/infrastructure \
-            "$TERRAFORM_IMAGE" init -input=false
+        run: terraform -chdir=infrastructure init -input=false
 
       - name: Terraform Validate
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace/infrastructure \
-            "$TERRAFORM_IMAGE" validate
+        run: terraform -chdir=infrastructure validate
 
       - name: Terraform Plan
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace/infrastructure \
-            "$TERRAFORM_IMAGE" plan -input=false -out=tfplan
+        run: terraform -chdir=infrastructure plan -input=false -out=tfplan
 
   deploy:
     name: Deploy Infrastructure And Workload
@@ -96,34 +95,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Validate AWS role secret
+      - name: Validate AWS role input
         run: |
-          if [ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]; then
-            echo "Missing required secret: AWS_ROLE_TO_ASSUME"
-            echo "Set repository secret AWS_ROLE_TO_ASSUME to your IAM role ARN trusted for GitHub OIDC."
+          if [ -z "$AWS_ROLE_TO_ASSUME" ]; then
+            echo "Missing AWS role ARN. Provide one of:"
+            echo "1) workflow_dispatch input: aws_role_to_assume"
+            echo "2) repository variable: AWS_ROLE_TO_ASSUME"
             exit 1
           fi
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v5
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
           role-session-name: github-actions-deploy
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
       - name: Terraform Init
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace/infrastructure \
-            "$TERRAFORM_IMAGE" init -input=false
+        run: terraform -chdir=infrastructure init -input=false
 
       - name: Terraform Apply
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace/infrastructure \
-            "$TERRAFORM_IMAGE" apply -input=false -auto-approve
+        run: terraform -chdir=infrastructure apply -input=false -auto-approve
 
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
