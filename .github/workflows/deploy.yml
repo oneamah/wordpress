@@ -35,25 +35,34 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: ${{ vars.AWS_REGION || github.event.inputs.aws_region }}
-  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME || github.event.inputs.eks_cluster_name }}
-  AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+  AWS_REGION: ${{ github.event.inputs.aws_region || vars.AWS_REGION || 'us-east-1' }}
+  EKS_CLUSTER_NAME: ${{ github.event.inputs.eks_cluster_name || vars.EKS_CLUSTER_NAME || 'wordpress-eks' }}
   WORDPRESS_NAMESPACE: ${{ vars.WORDPRESS_NAMESPACE || 'wordpress' }}
   WORDPRESS_RELEASE_NAME: ${{ vars.WORDPRESS_RELEASE_NAME || 'wordpress' }}
   TERRAFORM_IMAGE: hashicorp/terraform:1.14.8
 jobs:
   terraform-plan:
     name: Terraform Plan
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     continue-on-error: false
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Validate AWS role secret
+        run: |
+          if [ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]; then
+            echo "Missing required secret: AWS_ROLE_TO_ASSUME"
+            echo "Set repository secret AWS_ROLE_TO_ASSUME to your IAM role ARN trusted for GitHub OIDC."
+            exit 1
+          fi
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v5
         with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-session-name: github-actions-terraform-plan
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
@@ -87,10 +96,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Validate AWS role secret
+        run: |
+          if [ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]; then
+            echo "Missing required secret: AWS_ROLE_TO_ASSUME"
+            echo "Set repository secret AWS_ROLE_TO_ASSUME to your IAM role ARN trusted for GitHub OIDC."
+            exit 1
+          fi
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v5
         with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-session-name: github-actions-deploy
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
