@@ -30,3 +30,9 @@ variable "tags" {
   type    = map(string)
   default = {}
 }
+
+variable "admin_iam_arns" {
+  description = "List of IAM user/role ARNs to grant cluster-admin access via EKS access entries."
+  type        = list(string)
+  default     = []
+}
