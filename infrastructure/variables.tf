@@ -64,6 +64,12 @@ variable "external_dns_domain_filters" {
   default     = []
 }
 
+variable "admin_iam_arns" {
+  description = "IAM user/role ARNs that get cluster-admin access to EKS (for local kubectl access)."
+  type        = list(string)
+  default     = []
+}
+
 variable "tags" {
   description = "Extra tags applied to resources."
   type        = map(string)
