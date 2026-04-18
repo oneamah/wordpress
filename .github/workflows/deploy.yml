@@ -178,6 +178,8 @@ jobs:
               --wait \
               --timeout 15m \
               --set service.type=LoadBalancer \
+              --set service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-scheme"=internet-facing \
+              --set service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=nlb \
               --set persistence.enabled=true \
               --set persistence.storageClass=wordpress-efs \
               --set persistence.accessModes[0]=ReadWriteMany \
