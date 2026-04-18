@@ -131,6 +131,36 @@ jobs:
       - name: Create namespace
         run: kubectl create namespace "$WORDPRESS_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
+      - name: Create EFS StorageClass
+        run: |
+          EFS_FILE_SYSTEM_ID="$(terraform -chdir=infrastructure output -raw efs_file_system_id)"
+
+          if [ -z "$EFS_FILE_SYSTEM_ID" ]; then
+            echo "Missing EFS filesystem ID from Terraform output."
+            exit 1
+          fi
+
+          cat <<EOF | kubectl apply -f -
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: wordpress-efs
+          provisioner: efs.csi.aws.com
+          parameters:
+            provisioningMode: efs-ap
+            fileSystemId: ${EFS_FILE_SYSTEM_ID}
+            directoryPerms: "700"
+            basePath: "/wordpress"
+          reclaimPolicy: Retain
+          volumeBindingMode: Immediate
+          allowVolumeExpansion: true
+          EOF
+
+      - name: Wait for EFS CSI driver
+        run: |
+          kubectl -n kube-system rollout status deployment/efs-csi-controller --timeout=10m
+          kubectl -n kube-system rollout status daemonset/efs-csi-node --timeout=10m
+
       - name: Deploy WordPress manifest if present
         run: |
           if [ -s gitops/app.yml ]; then
@@ -145,9 +175,14 @@ jobs:
           helm upgrade --install "$WORDPRESS_RELEASE_NAME" bitnami/wordpress \
             --namespace "$WORDPRESS_NAMESPACE" \
             --wait \
+            --timeout 15m \
             --set service.type=LoadBalancer \
             --set persistence.enabled=true \
+            --set persistence.storageClass=wordpress-efs \
+            --set persistence.accessModes[0]=ReadWriteMany \
             --set mariadb.primary.persistence.enabled=true \
+            --set mariadb.primary.persistence.storageClass=wordpress-efs \
+            --set mariadb.primary.persistence.accessModes[0]=ReadWriteMany \
             --set wordpressUsername="${{ secrets.WORDPRESS_ADMIN_USER }}" \
             --set wordpressPassword="${{ secrets.WORDPRESS_ADMIN_PASSWORD }}" \
             --set wordpressEmail="${{ secrets.WORDPRESS_ADMIN_EMAIL }}" \
